@@ -1,159 +1,57 @@
 
 """
-Books to Scrape -> CSV + JSON (cross‑platform, single file)
+Project :- 1
+Web Scraper using BeautifulSoup
 
-Usage:
-  python books_any_platform.py
-  python books_any_platform.py --url http://books.toscrape.com/ --csv books.csv --json books.json --delay 0.5
-Requires:
-  - Python 3.x
-  - Auto-installs: requests, beautifulsoup4 (if missing)
+This program scrapes book details (title, price, availability)
+from 'http://books.toscrape.com/' and saves them into a CSV file.
 """
-from __future__ import annotations
 
-import argparse
+import requests
+from bs4 import BeautifulSoup
 import csv
-import json
-import sys
-import time
-from typing import List, Dict, Tuple, Optional
-from urllib.parse import urljoin
 
-# Ensure dependencies (requests, bs4) are present
-try:
-    import requests  # type: ignore
-    from bs4 import BeautifulSoup  # type: ignore
-except Exception:
-    import subprocess
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests", "beautifulsoup4"], stdout=sys.stdout)
-    import requests  # type: ignore
-    from bs4 import BeautifulSoup  # type: ignore
+def scrape_books(url, output_file="books.csv"):
+    try:
+        # Send request to website with headers
+        headers = {"User-Agent": "Mozilla/5.0"}
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()  # Raise error if request fails
 
-from requests.adapters import HTTPAdapter
-try:
-    # urllib3 Retry location varies by version; this import works for requests>=2.16
-    from urllib3.util.retry import Retry  # type: ignore
-except Exception:
-    Retry = None  # Fallback: simple fetch without retry
+        # Parse the HTML page
+        soup = BeautifulSoup(response.text, "html.parser")
 
-DEFAULT_START_URL = "http://books.toscrape.com/"
-DEFAULT_CSV = "books.csv"
-DEFAULT_JSON = "books.json"
-USER_AGENT = "Mozilla/5.0 (compatible; LovableScraper/1.0; +https://example.com)"
+        # Find all book containers
+        books = soup.find_all("article", class_="product_pod")
 
-def build_session() -> requests.Session:
-    s = requests.Session()
-    s.headers.update({"User-Agent": USER_AGENT, "Accept-Language": "en"})
-    if Retry is not None:
-        retry = Retry(
-            total=5,
-            connect=5,
-            read=5,
-            status=5,
-            backoff_factor=0.5,
-            status_forcelist=[429, 500, 502, 503, 504],
-            allowed_methods=["GET", "HEAD", "OPTIONS"],
-            raise_on_status=False,
-        )
-        adapter = HTTPAdapter(max_retries=retry)
-        s.mount("http://", adapter)
-        s.mount("https://", adapter)
-    return s
+        if not books:
+            print("⚠️ No books found. The page structure may have changed.")
+            return
 
-def fetch(session: requests.Session, url: str, timeout: int = 20) -> str:
-    r = session.get(url, timeout=timeout)
-    r.raise_for_status()
-    return r.text
+        # Open CSV file for writing
+        with open(output_file, "w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["Title", "Price", "Availability"])  # Header row
 
-def parse_books(html: str, base_url_for_links: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    soup = BeautifulSoup(html, "html.parser")
-    items: List[Dict[str, str]] = []
+            # Loop through each book and extract details
+            for book in books:
+                title = book.h3.a["title"]
+                price = book.find("p", class_="price_color").text
+                availability = book.find("p", class_="instock availability").text.strip()
 
-    for article in soup.select("article.product_pod"):
-        title_el = article.select_one("h3 a")
-        price_el = article.select_one("p.price_color")
-        avail_el = article.select_one("p.instock.availability")
-        rating_el = article.select_one("p.star-rating")
+                writer.writerow([title, price, availability])
 
-        title = (title_el.get("title") or title_el.get_text(strip=True) if title_el else "").strip()
-        price = price_el.get_text(strip=True) if price_el else ""
-        availability = avail_el.get_text(strip=True) if avail_el else ""
-        rating_class = rating_el.get("class", []) if rating_el else []
-        rating = next((c for c in rating_class if c.lower() != "star-rating"), "")
+        print(f"✅ Data scraped successfully and saved to {output_file}")
 
-        href = title_el.get("href", "") if title_el else ""
-        detail_url = urljoin(base_url_for_links, href)
+    except Exception as e:
+        print("❌ Error:", e)
 
-        items.append({
-            "title": title,
-            "price": price,
-            "availability": availability,
-            "rating": rating,
-            "detail_url": detail_url,
-        })
 
-    next_link = soup.select_one("li.next > a")
-    next_url = urljoin(base_url_for_links, next_link["href"]) if next_link and next_link.get("href") else None
-    return items, next_url
-
-def scrape_all(start_url: str, delay: float = 0.5, limit_pages: Optional[int] = None) -> List[Dict[str, str]]:
-    session = build_session()
-    url = start_url
-    all_items: List[Dict[str, str]] = []
-    page = 0
-
-    while url:
-        page += 1
-        if limit_pages and page > limit_pages:
-            break
-
-        print(f"[{page}] Fetching: {url}", flush=True)
-        try:
-            html = fetch(session, url)
-        except Exception as e:
-            print(f"Error fetching {url}: {e}", file=sys.stderr)
-            break
-
-        items, next_url = parse_books(html, url)
-        print(f"  -> Found {len(items)} items", flush=True)
-        all_items.extend(items)
-
-        url = next_url
-        if url:
-            time.sleep(delay)
-
-    print(f"Total items: {len(all_items)}")
-    return all_items
-
-def write_csv(path: str, rows: List[Dict[str, str]]) -> None:
-    if not rows:
-        print("No data to write to CSV.")
-        return
-    fieldnames = ["title", "price", "availability", "rating", "detail_url"]
-    with open(path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
-    print(f"Saved CSV: {path}")
-
-def write_json(path: str, rows: List[Dict[str, str]]) -> None:
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(rows, f, ensure_ascii=False, indent=2)
-    print(f"Saved JSON: {path}")
-
-def main():
-    parser = argparse.ArgumentParser(description="Scrape books.toscrape.com into CSV/JSON (cross-platform).")
-    parser.add_argument("--url", default=DEFAULT_START_URL, help="Start URL (default: homepage).")
-    parser.add_argument("--csv", default=DEFAULT_CSV, help=f"CSV output path (default: {DEFAULT_CSV})")
-    parser.add_argument("--json", default=DEFAULT_JSON, help=f"JSON output path (default: {DEFAULT_JSON})")
-    parser.add_argument("--delay", type=float, default=0.5, help="Delay between page requests, seconds (default: 0.5)")
-    parser.add_argument("--limit-pages", type=int, default=None, help="Optional limit on number of pages to crawl")
-    args = parser.parse_args()
-
-    data = scrape_all(args.url, delay=args.delay, limit_pages=args.limit_pages)
-    write_csv(args.csv, data)
-    write_json(args.json, data)
-    print("Done.")
-
+# Run scraper
 if __name__ == "__main__":
-    main()
+    scrape_books("http://books.toscrape.com/")
+
+
+How to Run:
+pip install requests beautifulsoup4
+python web_scraper.py
